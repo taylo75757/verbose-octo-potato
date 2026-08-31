@@ -1,0 +1,58 @@
+name: socks-chrome
+on:
+  workflow_dispatch:
+
+jobs:
+  s:
+    runs-on: windows-latest
+    timeout-minutes: 360
+    steps:
+      - name: RDP + user
+        shell: pwsh
+        run: |
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
+          Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
+          $p = ConvertTo-SecureString "admin@123" -AsPlainText -Force
+          if (-not (Get-LocalUser TOOLBOXLAP -ErrorAction SilentlyContinue)) {
+            New-LocalUser TOOLBOXLAP -Password $p -AccountNeverExpires
+          }
+          Add-LocalGroupMember Administrators TOOLBOXLAP -ErrorAction SilentlyContinue
+          Add-LocalGroupMember "Remote Desktop Users" TOOLBOXLAP -ErrorAction SilentlyContinue
+          netsh advfirewall firewall add rule name="RDP" dir=in action=allow protocol=TCP localport=3389 | Out-Null
+          netsh advfirewall firewall add rule name="socks1080" dir=in action=allow protocol=TCP localport=1080 | Out-Null
+          Restart-Service TermService -Force
+
+      - name: Tailscale
+        shell: pwsh
+        run: |
+          $msi = "$env:TEMP\ts.msi"
+          Invoke-WebRequest "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi" -OutFile $msi -UseBasicParsing
+          Start-Process msiexec.exe -ArgumentList "/i `"$msi`" /quiet /norestart" -Wait
+          $ts = "$env:ProgramFiles\Tailscale\tailscale.exe"
+          & $ts up --authkey="tskey-auth-kAeF5sRd8221CNTRL-epukZnWACV5jo6wpyE11V5DbMY6rwRrVN" --hostname="gh-$env:GITHUB_RUN_ID" --accept-dns=false --accept-routes=false
+          Start-Sleep 8
+          Write-Host "TS_IP=$((& $ts ip -4).Trim())"
+          & $ts netcheck
+          & $ts status
+
+      - name: gost SOCKS
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force C:\proxy | Out-Null
+          Invoke-WebRequest "https://github.com/go-gost/gost/releases/download/v3.0.0-rc10/gost_3.0.0-rc10_windows_amd64.zip" -OutFile C:\proxy\g.zip -UseBasicParsing
+          Expand-Archive C:\proxy\g.zip C:\proxy\g -Force
+          Copy-Item (Get-ChildItem C:\proxy\g -Recurse -Filter gost.exe | Select-Object -First 1).FullName C:\proxy\gost.exe -Force
+          Start-Process C:\proxy\gost.exe -ArgumentList "-L=socks5://:1080" -WindowStyle Hidden
+          Start-Sleep 2
+          netstat -ano | findstr ":1080"
+
+      - name: keep
+        shell: pwsh
+        run: |
+          $ts = "$env:ProgramFiles\Tailscale\tailscale.exe"
+          while ($true) {
+            Write-Host "[$(Get-Date -Format o)] ip=$((& $ts ip -4).Trim())"
+            & $ts status
+            Start-Sleep 300
+          }
